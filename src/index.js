@@ -93,6 +93,43 @@ const diffTasks = (previous = [], current = []) => {
   return { added, removed, completed, reopened, modified };
 };
 
+const translateQueryToFilter = (query) => {
+  if (!query || typeof query !== 'string') return null;
+
+  let work = query.trim();
+
+  const replacements = [
+    { regex: /\bAND\b/gi, replace: '&' },
+    { regex: /\bOR\b/gi, replace: '|' },
+    { regex: /\s*=\s*/g, replace: ':' }
+  ];
+  replacements.forEach((r) => {
+    work = work.replace(r.regex, r.replace);
+  });
+
+  work = work.replace(/priority\s*>=\s*(\d)/gi, (_, n) => {
+    const num = Number.parseInt(n, 10);
+    const values = [1, 2, 3, 4].filter((v) => v >= num);
+    return values.map((v) => `p${v}`).join(' | ');
+  });
+
+  work = work.replace(/priority\s*<=\s*(\d)/gi, (_, n) => {
+    const num = Number.parseInt(n, 10);
+    const values = [1, 2, 3, 4].filter((v) => v <= num);
+    return values.map((v) => `p${v}`).join(' | ');
+  });
+
+  work = work.replace(/priority\s*:\s*(\d)/gi, (_, n) => `p${n}`);
+  work = work.replace(/due\s*:\s*today/gi, 'today');
+  work = work.replace(/due\s*:\s*tomorrow/gi, 'tomorrow');
+  work = work.replace(/due\s*:\s*overdue/gi, 'overdue');
+
+  work = work.replace(/project\s*:\s*["']([^"']+)["']/gi, (_, name) => `#${name}`);
+  work = work.replace(/project\s*:\s*([^\s&|]+)/gi, (_, name) => `#${name}`);
+
+  return work;
+};
+
 const createFormatter = () => new Formatters(program.opts().noColor ? false : config.shouldUseColor());
 
 const handleError = (formatter, error) => {
@@ -109,7 +146,11 @@ const withClient = (handler) => async (...args) => {
   try {
     await handler({ args, client, formatter, format });
   } catch (error) {
-    handleError(formatter, error);
+    if (error && error.code) {
+      renderStructuredError(format, formatter, error);
+    } else {
+      handleError(formatter, error);
+    }
   }
 };
 
@@ -120,7 +161,43 @@ const withFormatter = (handler) => async (...args) => {
   try {
     await handler({ args, formatter, format });
   } catch (error) {
-    handleError(formatter, error);
+    if (error && error.code) {
+      renderStructuredError(format, formatter, error);
+    } else {
+      handleError(formatter, error);
+    }
+  }
+};
+
+const exitCodeForError = (code) => {
+  switch (code) {
+    case 'UNAUTHORIZED':
+      return 2;
+    case 'VALIDATION_ERROR':
+      return 3;
+    case 'TASK_NOT_FOUND':
+      return 4;
+    case 'RATE_LIMIT':
+      return 5;
+    case 'SERVER_ERROR':
+      return 6;
+    default:
+      return 1;
+  }
+};
+
+const renderStructuredError = (format, formatter, error) => {
+  const payload = {
+    error: error.code || 'UNKNOWN_ERROR',
+    status: error.status,
+    message: error.message
+  };
+  process.exitCode = exitCodeForError(error.code);
+
+  if (format === 'json') {
+    console.error(JSON.stringify(payload, null, 2));
+  } else {
+    console.error(formatter.error(`${payload.error}: ${payload.message}`));
   }
 };
 
@@ -194,6 +271,7 @@ program
   .option('--project <id>', 'filter by project ID')
   .option('--label <id>', 'filter by label ID')
   .option('--filter <query>', 'Todoist filter query, e.g., "today & @work"')
+  .option('--query <expression>', 'SQL-like expression, e.g., "priority >= 3 AND due = today"')
   .option('--ids <ids>', 'comma-separated list of task IDs')
   .option('--with-lookups', 'fetch labels and projects to show names')
   .action(
@@ -202,7 +280,7 @@ program
       const filters = {
         projectId: options.project,
         labelId: options.label,
-        filter: options.filter
+        filter: options.filter || translateQueryToFilter(options.query)
       };
 
       if (options.ids) {
@@ -220,6 +298,7 @@ program
   .description('Complete/close multiple tasks by IDs or filter')
   .argument('[task-ids...]', 'one or more task IDs to close')
   .option('--filter <query>', 'Todoist filter query, e.g., "today & @work"')
+  .option('--query <expression>', 'SQL-like expression, e.g., "priority >= 3 AND due = today"')
   .option('--project <id>', 'filter by project ID')
   .option('--label <id>', 'filter by label ID')
   .action(
@@ -227,9 +306,9 @@ program
       const [taskIds = [], options] = args;
       let targets = [...taskIds];
 
-      if (options.filter || options.project || options.label) {
+      if (options.filter || options.query || options.project || options.label) {
         const filters = {
-          filter: options.filter,
+          filter: options.filter || translateQueryToFilter(options.query),
           projectId: options.project,
           labelId: options.label
         };
@@ -327,6 +406,73 @@ program
   );
 
 program
+  .command('task:upsert')
+  .description('Create a task or update if a matching task exists (same content and project)')
+  .argument('<content>', 'task content')
+  .option('--description <text>', 'task description/notes')
+  .option('--project <id>', 'project ID')
+  .option('--labels <ids>', 'comma-separated label IDs')
+  .option('--priority <1-4>', 'priority (1 low - 4 urgent)', parsePriority, 1)
+  .option('--due-string <text>', 'natural language due string, e.g., "tomorrow 18:00"')
+  .option('--due-date <date>', 'due date (YYYY-MM-DD)')
+  .option('--due-datetime <datetime>', 'due date and time (ISO 8601)')
+  .option('--due-lang <lang>', 'language for due string (e.g., en, de)')
+  .option('--assignee <id>', 'assign to user ID')
+  .action(
+    withClient(async ({ args, client, formatter, format }) => {
+      const [content, options] = args;
+
+      const payload = {
+        content,
+        description: options.description,
+        project_id: options.project,
+        label_ids: options.labels ? parseCsv(options.labels) : undefined,
+        priority: options.priority,
+        due_string: options.dueString,
+        due_date: options.dueDate,
+        due_datetime: options.dueDatetime,
+        due_lang: options.dueLang,
+        assignee: options.assignee
+      };
+
+      let existing = [];
+      try {
+        existing = await client.getTasks({
+          projectId: options.project,
+          filter: content ? `search:"${content}"` : undefined
+        });
+      } catch {
+        existing = [];
+      }
+
+      const match = existing.find((t) => t.content === content && (!options.project || t.project_id === options.project));
+
+      if (match) {
+        await client.updateTask(match.id, payload);
+        const task = await client.getTask(match.id);
+        const context = await buildLookupContext(client, true);
+        if (format === 'json') {
+          console.log(JSON.stringify({ action: 'updated', task }, null, 2));
+        } else {
+          console.log(formatter.info('Task existed, updated instead of creating.'));
+          console.log(formatter.formatTask(task, format, context));
+        }
+        return;
+      }
+
+      const task = await client.createTask(payload);
+      const context = await buildLookupContext(client, true);
+
+      if (format === 'json') {
+        console.log(JSON.stringify({ action: 'created', task }, null, 2));
+      } else {
+        console.log(formatter.success('Task created (upsert).'));
+        console.log(formatter.formatTask(task, format, context));
+      }
+    })
+  );
+
+program
   .command('task:update')
   .description('Update an existing task')
   .argument('<task-id>', 'task ID')
@@ -376,6 +522,7 @@ program
   .description('Update multiple tasks by IDs or filter')
   .argument('[task-ids...]', 'one or more task IDs to update')
   .option('--filter <query>', 'Todoist filter query, e.g., "today & @work"')
+  .option('--query <expression>', 'SQL-like expression, e.g., "priority >= 3 AND due = today"')
   .option('--project <id>', 'project ID')
   .option('--labels <ids>', 'comma-separated label IDs')
   .option('--priority <1-4>', 'priority (1 low - 4 urgent)', parsePriority)
@@ -409,8 +556,8 @@ program
       }
 
       let targets = [...taskIds];
-      if (options.filter) {
-        const tasks = await client.getTasks({ filter: options.filter });
+      if (options.filter || options.query) {
+        const tasks = await client.getTasks({ filter: options.filter || translateQueryToFilter(options.query) });
         targets = targets.concat(tasks.map((t) => t.id));
       }
 
@@ -759,64 +906,79 @@ program
   .command('tasks:diff')
   .description('Show changes since last snapshot (added/removed/completed/reopened/modified)')
   .option('--filter <query>', 'Todoist filter query, e.g., "today & @work"')
+  .option('--query <expression>', 'SQL-like expression, e.g., "priority >= 3 AND due = today"')
   .option('--project <id>', 'filter by project ID')
   .option('--label <id>', 'filter by label ID')
   .option('--no-cache-update', 'do not update the snapshot after diff')
+  .option('--watch', 'watch for changes, emitting diffs on each poll')
+  .option('--interval <seconds>', 'poll interval in seconds (watch mode)', (v) => parseInt(v, 10), 10)
   .action(
     withClient(async ({ args, client, formatter, format }) => {
       const [options] = args;
       const filters = {
-        filter: options.filter,
+        filter: options.filter || translateQueryToFilter(options.query),
         projectId: options.project,
         labelId: options.label
       };
 
-      const tasks = await client.getTasks(filters);
       const cachePath = config.getCachePath('tasks_cache.json');
 
-      let previous = [];
-      try {
-        const fs = await import('fs');
-        if (fs.existsSync(cachePath)) {
-          const raw = fs.readFileSync(cachePath, 'utf8');
-          previous = JSON.parse(raw);
-        }
-      } catch {
-        // ignore cache read errors
-      }
+      const runDiffOnce = async () => {
+        const tasks = await client.getTasks(filters);
 
-      const summary = diffTasks(previous, tasks);
-
-      if (format === 'json') {
-        console.log(JSON.stringify(summary, null, 2));
-      } else {
-        const sections = [
-          { name: 'Added', list: summary.added.map((t) => t.id) },
-          { name: 'Removed', list: summary.removed.map((t) => t.id) },
-          { name: 'Completed', list: summary.completed.map((t) => t.id) },
-          { name: 'Reopened', list: summary.reopened.map((t) => t.id) },
-          { name: 'Modified', list: summary.modified.map((t) => t.after.id) }
-        ];
-
-        sections.forEach((section) => {
-          if (section.list.length === 0) return;
-          console.log(formatter.bold(section.name + ':'));
-          section.list.forEach((id) => console.log(`- ${id}`));
-          console.log('');
-        });
-
-        if (!sections.some((s) => s.list.length > 0)) {
-          console.log(formatter.info('No changes since last snapshot.'));
-        }
-      }
-
-      if (options.cacheUpdate !== false) {
-        const fs = await import('fs');
+        let previous = [];
         try {
-          fs.writeFileSync(cachePath, JSON.stringify(tasks, null, 2));
+          const fs = await import('fs');
+          if (fs.existsSync(cachePath)) {
+            const raw = fs.readFileSync(cachePath, 'utf8');
+            previous = JSON.parse(raw);
+          }
         } catch {
-          // ignore cache write errors
+          // ignore cache read errors
         }
+
+        const summary = diffTasks(previous, tasks);
+
+        if (format === 'json') {
+          console.log(JSON.stringify(summary, null, 2));
+        } else {
+          const sections = [
+            { name: 'Added', list: summary.added.map((t) => t.id) },
+            { name: 'Removed', list: summary.removed.map((t) => t.id) },
+            { name: 'Completed', list: summary.completed.map((t) => t.id) },
+            { name: 'Reopened', list: summary.reopened.map((t) => t.id) },
+            { name: 'Modified', list: summary.modified.map((t) => t.after.id) }
+          ];
+
+          sections.forEach((section) => {
+            if (section.list.length === 0) return;
+            console.log(formatter.bold(section.name + ':'));
+            section.list.forEach((id) => console.log(`- ${id}`));
+            console.log('');
+          });
+
+          if (!sections.some((s) => s.list.length > 0)) {
+            console.log(formatter.info('No changes since last snapshot.'));
+          }
+        }
+
+        if (options.cacheUpdate !== false) {
+          const fs = await import('fs');
+          try {
+            fs.writeFileSync(cachePath, JSON.stringify(tasks, null, 2));
+          } catch {
+            // ignore cache write errors
+          }
+        }
+      };
+
+      if (options.watch) {
+        console.log(formatter.info(`Watching for changes every ${options.interval}s... (Ctrl+C to stop)`));
+        await runDiffOnce();
+        const intervalMs = Math.max(1, options.interval || 10) * 1000;
+        setInterval(runDiffOnce, intervalMs);
+      } else {
+        await runDiffOnce();
       }
     })
   );

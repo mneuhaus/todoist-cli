@@ -1,6 +1,6 @@
 {
   "name": "@mneuhaus/todoist-cli",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Todoist CLI - Focused command line access to the Todoist REST API for automation and LLM agents",
   "type": "module",
   "main": "src/index.js",

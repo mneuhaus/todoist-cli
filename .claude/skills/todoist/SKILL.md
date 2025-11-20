@@ -26,12 +26,13 @@ Config lives at `~/.config/todoist-cli/config.json` (defaults to `https://api.to
 ## Tasks
 
 ```bash
-todoist tasks [--project <id> | --label <id> | --filter "<query>" | --ids <id1,id2>] [--with-lookups]
+todoist tasks [--project <id> | --label <id> | --filter "<query>" | --query "<expr>" | --ids <id1,id2>] [--with-lookups]
 todoist task <task-id> [--with-lookups]
 todoist task:add "<content>" [--project <id>] [--labels <ids>] [--priority 1-4] [--due-string "<text>"] [--due-date YYYY-MM-DD] [--description "<notes>"]
 todoist task:update <task-id> [--content] [--project] [--labels] [--priority] [--due-string|--due-date|--due-datetime] [--description]
 todoist tasks:update [ids...] [--filter "<query>"] [--priority ...] [...]
 todoist tasks:close [ids...] [--filter "<query>"] | task:reopen <task-id> | task:delete <task-id>
+todoist task:upsert "<content>" [--project <id>] [...]
 ```
 
 ## Projects
@@ -67,6 +68,7 @@ todoist comment:delete <comment-id>
 
 ```bash
 todoist tasks:diff --filter "today"
+todoist tasks:diff --query "priority >= 3 AND due = today" --watch --interval 15
 ```
 ```
 

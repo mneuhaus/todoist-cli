@@ -41,9 +41,11 @@ The token is stored at `~/.config/todoist-cli/config.json`.
 ```bash
 # Tasks
 todoist tasks --filter "today & @work" --with-lookups
+todoist tasks --query "priority >= 3 AND due = today"
 todoist task 2995104338 --with-lookups
 todoist task:add "Draft Todoist CLI" --project 123 --labels 456,789 --priority 3 --due-string "friday 17:00"
 todoist task:update 2995104338 --priority 4 --due-date 2024-12-01
+todoist task:upsert "Fix prod alert" --project 123 --priority 4 --due-string "today 17:00"
 todoist task:close 2995104338
 todoist tasks:close 9752418855 9752419011 --filter "today"
 todoist tasks:update --filter "today & #Project" --priority 3
@@ -64,6 +66,7 @@ todoist comment:add --task 2995104338 --content "Ship with README + auth"
 
 # Diffs (snapshot comparison)
 todoist tasks:diff --filter "today"
+todoist tasks:diff --query "priority >= 3 AND due = today" --watch --interval 15
 ```
 
 ## Output Formats

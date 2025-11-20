@@ -37,10 +37,12 @@ export class TodoistClient {
 
     if (!response.ok) {
       const errorBody = await response.text();
-      const message = errorBody
-        ? `${response.status} ${response.statusText}: ${errorBody}`
-        : `${response.status} ${response.statusText}`;
-      throw new Error(message);
+      const error = new Error(
+        errorBody ? `${response.status} ${response.statusText}: ${errorBody}` : `${response.status} ${response.statusText}`
+      );
+      error.status = response.status;
+      error.code = this.mapStatusToCode(response.status);
+      throw error;
     }
 
     if (response.status === 204) {
@@ -69,6 +71,15 @@ export class TodoistClient {
         ([, value]) => value !== undefined && value !== null
       )
     );
+  }
+
+  mapStatusToCode(status) {
+    if (status === 401 || status === 403) return 'UNAUTHORIZED';
+    if (status === 404) return 'TASK_NOT_FOUND';
+    if (status === 429) return 'RATE_LIMIT';
+    if (status >= 500) return 'SERVER_ERROR';
+    if (status >= 400) return 'VALIDATION_ERROR';
+    return 'UNKNOWN_ERROR';
   }
 
   // Tasks
