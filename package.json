@@ -1,0 +1,41 @@
+{
+  "name": "@mneuhaus/todoist-cli",
+  "version": "1.0.0",
+  "description": "Todoist CLI - Focused command line access to the Todoist REST API for automation and LLM agents",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "todoist": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "build": "bun build --compile --minify --sourcemap --target bun src/index.js --outfile todoist",
+    "dev": "node --watch src/index.js",
+    "lint": "node --check src/index.js"
+  },
+  "keywords": [
+    "todoist",
+    "cli",
+    "tasks",
+    "productivity",
+    "gtd"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mneuhaus/todoist-cli.git"
+  },
+  "homepage": "https://github.com/mneuhaus/todoist-cli",
+  "bugs": {
+    "url": "https://github.com/mneuhaus/todoist-cli/issues"
+  },
+  "author": "Marc Neuhaus <marc@mneuhaus.me>",
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "cli-table3": "^0.6.3",
+    "commander": "^11.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
