@@ -30,6 +30,69 @@ const parseInteger = (value, message = 'Value must be a number.') => {
   return parsed;
 };
 
+const normalizeTaskForDiff = (task) => ({
+  id: task.id,
+  content: task.content,
+  description: task.description || '',
+  project_id: task.project_id,
+  section_id: task.section_id,
+  parent_id: task.parent_id,
+  order: task.order,
+  labels: task.labels ? [...task.labels].sort() : [],
+  priority: task.priority,
+  due: task.due
+    ? {
+        date: task.due.date,
+        string: task.due.string,
+        lang: task.due.lang,
+        is_recurring: task.due.is_recurring
+      }
+    : null,
+  is_completed: task.is_completed || task.completed || false
+});
+
+const diffTasks = (previous = [], current = []) => {
+  const prevMap = new Map(previous.map((t) => [t.id, normalizeTaskForDiff(t)]));
+  const currMap = new Map(current.map((t) => [t.id, normalizeTaskForDiff(t)]));
+
+  const added = [];
+  const removed = [];
+  const completed = [];
+  const reopened = [];
+  const modified = [];
+
+  currMap.forEach((curr, id) => {
+    if (!prevMap.has(id)) {
+      added.push(curr);
+      return;
+    }
+
+    const prev = prevMap.get(id);
+    if (prev.is_completed === false && curr.is_completed === true) {
+      completed.push(curr);
+    } else if (prev.is_completed === true && curr.is_completed === false) {
+      reopened.push(curr);
+    }
+
+    const prevCopy = { ...prev };
+    const currCopy = { ...curr };
+    delete prevCopy.is_completed;
+    delete currCopy.is_completed;
+
+    if (JSON.stringify(prevCopy) !== JSON.stringify(currCopy)) {
+      modified.push({ before: prev, after: curr });
+    }
+  });
+
+  prevMap.forEach((prev, id) => {
+    if (!currMap.has(id)) {
+      removed.push(prev);
+    }
+  });
+
+  return { added, removed, completed, reopened, modified };
+};
+
 const createFormatter = () => new Formatters(program.opts().noColor ? false : config.shouldUseColor());
 
 const handleError = (formatter, error) => {
@@ -153,6 +216,65 @@ program
   );
 
 program
+  .command('tasks:close')
+  .description('Complete/close multiple tasks by IDs or filter')
+  .argument('[task-ids...]', 'one or more task IDs to close')
+  .option('--filter <query>', 'Todoist filter query, e.g., "today & @work"')
+  .option('--project <id>', 'filter by project ID')
+  .option('--label <id>', 'filter by label ID')
+  .action(
+    withClient(async ({ args, client, formatter, format }) => {
+      const [taskIds = [], options] = args;
+      let targets = [...taskIds];
+
+      if (options.filter || options.project || options.label) {
+        const filters = {
+          filter: options.filter,
+          projectId: options.project,
+          labelId: options.label
+        };
+        const tasks = await client.getTasks(filters);
+        targets = targets.concat(tasks.map((t) => t.id));
+      }
+
+      const uniqueTargets = Array.from(new Set(targets));
+      if (uniqueTargets.length === 0) {
+        throw new Error('Provide at least one task ID or a filter to select tasks.');
+      }
+
+      const results = [];
+      for (const id of uniqueTargets) {
+        try {
+          await client.closeTask(id);
+          results.push({ id, status: 'closed' });
+        } catch (error) {
+          const message = error?.message || String(error);
+          if (message.includes('ALREADY') || message.includes('already')) {
+            results.push({ id, status: 'unchanged' });
+          } else {
+            results.push({ id, status: 'failed', error: message });
+          }
+        }
+      }
+
+      if (format === 'json') {
+        console.log(JSON.stringify({ results }, null, 2));
+        return;
+      }
+
+      results.forEach((entry) => {
+        if (entry.status === 'closed') {
+          console.log(formatter.success(`Closed ${entry.id}`));
+        } else if (entry.status === 'unchanged') {
+          console.log(formatter.info(`Unchanged ${entry.id}`));
+        } else {
+          console.log(formatter.error(`Failed ${entry.id}: ${entry.error}`));
+        }
+      });
+    })
+  );
+
+program
   .command('task')
   .description('Show a specific task')
   .argument('<task-id>', 'task ID')
@@ -246,6 +368,79 @@ program
 
       console.log(formatter.success('Task updated.'));
       console.log(formatter.formatTask(task, format, context));
+    })
+  );
+
+program
+  .command('tasks:update')
+  .description('Update multiple tasks by IDs or filter')
+  .argument('[task-ids...]', 'one or more task IDs to update')
+  .option('--filter <query>', 'Todoist filter query, e.g., "today & @work"')
+  .option('--project <id>', 'project ID')
+  .option('--labels <ids>', 'comma-separated label IDs')
+  .option('--priority <1-4>', 'priority (1 low - 4 urgent)', parsePriority)
+  .option('--due-string <text>', 'natural language due string')
+  .option('--due-date <date>', 'due date (YYYY-MM-DD)')
+  .option('--due-datetime <datetime>', 'due date and time (ISO 8601)')
+  .option('--due-lang <lang>', 'language for due string (e.g., en, de)')
+  .option('--assignee <id>', 'assign to user ID')
+  .option('--content <text>', 'task content/title')
+  .option('--description <text>', 'task description/notes')
+  .action(
+    withClient(async ({ args, client, formatter, format }) => {
+      const [taskIds = [], options] = args;
+
+      const updates = {
+        content: options.content,
+        description: options.description,
+        project_id: options.project,
+        label_ids: options.labels ? parseCsv(options.labels) : undefined,
+        priority: options.priority,
+        due_string: options.dueString,
+        due_date: options.dueDate,
+        due_datetime: options.dueDatetime,
+        due_lang: options.dueLang,
+        assignee: options.assignee
+      };
+
+      const hasUpdates = Object.values(updates).some((value) => value !== undefined);
+      if (!hasUpdates) {
+        throw new Error('No updates provided.');
+      }
+
+      let targets = [...taskIds];
+      if (options.filter) {
+        const tasks = await client.getTasks({ filter: options.filter });
+        targets = targets.concat(tasks.map((t) => t.id));
+      }
+
+      const uniqueTargets = Array.from(new Set(targets));
+      if (uniqueTargets.length === 0) {
+        throw new Error('Provide at least one task ID or a filter to select tasks.');
+      }
+
+      const results = [];
+      for (const id of uniqueTargets) {
+        try {
+          await client.updateTask(id, updates);
+          results.push({ id, status: 'updated' });
+        } catch (error) {
+          results.push({ id, status: 'failed', error: error?.message || String(error) });
+        }
+      }
+
+      if (format === 'json') {
+        console.log(JSON.stringify({ results }, null, 2));
+        return;
+      }
+
+      results.forEach((entry) => {
+        if (entry.status === 'updated') {
+          console.log(formatter.success(`Updated ${entry.id}`));
+        } else {
+          console.log(formatter.error(`Failed ${entry.id}: ${entry.error}`));
+        }
+      });
     })
   );
 
@@ -557,6 +752,72 @@ program
       const [commentId] = args;
       await client.deleteComment(commentId);
       console.log(formatter.success(`Comment ${commentId} deleted.`));
+    })
+  );
+
+program
+  .command('tasks:diff')
+  .description('Show changes since last snapshot (added/removed/completed/reopened/modified)')
+  .option('--filter <query>', 'Todoist filter query, e.g., "today & @work"')
+  .option('--project <id>', 'filter by project ID')
+  .option('--label <id>', 'filter by label ID')
+  .option('--no-cache-update', 'do not update the snapshot after diff')
+  .action(
+    withClient(async ({ args, client, formatter, format }) => {
+      const [options] = args;
+      const filters = {
+        filter: options.filter,
+        projectId: options.project,
+        labelId: options.label
+      };
+
+      const tasks = await client.getTasks(filters);
+      const cachePath = config.getCachePath('tasks_cache.json');
+
+      let previous = [];
+      try {
+        const fs = await import('fs');
+        if (fs.existsSync(cachePath)) {
+          const raw = fs.readFileSync(cachePath, 'utf8');
+          previous = JSON.parse(raw);
+        }
+      } catch {
+        // ignore cache read errors
+      }
+
+      const summary = diffTasks(previous, tasks);
+
+      if (format === 'json') {
+        console.log(JSON.stringify(summary, null, 2));
+      } else {
+        const sections = [
+          { name: 'Added', list: summary.added.map((t) => t.id) },
+          { name: 'Removed', list: summary.removed.map((t) => t.id) },
+          { name: 'Completed', list: summary.completed.map((t) => t.id) },
+          { name: 'Reopened', list: summary.reopened.map((t) => t.id) },
+          { name: 'Modified', list: summary.modified.map((t) => t.after.id) }
+        ];
+
+        sections.forEach((section) => {
+          if (section.list.length === 0) return;
+          console.log(formatter.bold(section.name + ':'));
+          section.list.forEach((id) => console.log(`- ${id}`));
+          console.log('');
+        });
+
+        if (!sections.some((s) => s.list.length > 0)) {
+          console.log(formatter.info('No changes since last snapshot.'));
+        }
+      }
+
+      if (options.cacheUpdate !== false) {
+        const fs = await import('fs');
+        try {
+          fs.writeFileSync(cachePath, JSON.stringify(tasks, null, 2));
+        } catch {
+          // ignore cache write errors
+        }
+      }
     })
   );
 

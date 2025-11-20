@@ -131,4 +131,12 @@ export class Config {
 
     return { config: next, updated };
   }
+
+  getConfigDir() {
+    return CONFIG_DIR;
+  }
+
+  getCachePath(filename) {
+    return join(CONFIG_DIR, filename);
+  }
 }
